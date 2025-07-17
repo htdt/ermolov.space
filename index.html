@@ -22,7 +22,7 @@
             touch-action: none;
         }
         p { width: 60%; margin:0; text-align: center; line-height: 1.7; }
-        a { color:#ff0; text-decoration:none; transition: color 300ms; }
+        a { color:#fff; text-decoration:underline; transition: color 300ms; }
         a:hover { color: #fff; }
         
         canvas {
@@ -128,8 +128,8 @@
                         
                         totalDistortion += wave * envelope * 0.1;
                         
-                        // Color shift based on distance and age - gets darker as wave ages
-                        float ageFactor = 1.0 - (age / 5.0); // Fade from 1.0 to 0.0 over lifespan
+                        // Color shift based on distance and age - stay 100% bright until 0.5s before end
+                        float ageFactor = age < 4.5 ? 1.0 : 1.0 - ((age - 4.5) / 0.5); // Stay bright until 4.5s, then fade over 0.5s
                         colorShift += envelope * decay * ageFactor * 0.3;
                     }
                 }
@@ -160,7 +160,7 @@
                         if (j >= u_waveCount) break;
                         float waveAge = u_waveAges[j];
                         if (waveAge > 0.0 && waveAge < 5.0) {
-                            float weight = 1.0 - (waveAge / 5.0);
+                            float weight = waveAge < 4.5 ? 1.0 : 1.0 - ((waveAge - 4.5) / 0.5);
                             totalAgeFactor += weight;
                             totalWeight += 1.0;
                         }
