@@ -57,357 +57,291 @@
     <p><a href="mailto:alex@ermolov.space">alex@ermolov.space</a></p>
 
     <script>
-/*
-  Acid Waves — Single-file, mobile-first WebGL psychedelic ripple field
-  - Fullscreen canvas, no scrolling
-  - Multi-touch + mouse
-  - Time-based animation, wave decay with easing
-  - Neon spectrum with liquid distortion + subtle noise
-*/
+      (function() {
+        const MAX_WAVES = 16; // Number of simultaneous ripple sources in shader
 
-// Config
-const MAX_WAVES = 16;   // simultaneous wave sources
-const DECAY = 1.25;     // seconds to decay influence (base)
-const DECAY_VARIANCE = 0.6; // randomize per wave
-const DPR_CAP = 2;      // cap devicePixelRatio for perf
-const BASE_CYAN = [0.0, 1.0, 1.0]; // #00FFFF
+        const canvas = document.getElementById('canvas');
+        const gl = canvas.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
+        if (!gl) {
+          console.warn('WebGL not supported. Background effect disabled.');
+          return;
+        }
 
-// Boilerplate WebGL
-const canvas = document.getElementById('canvas');
-const gl = canvas.getContext('webgl', { antialias: false, depth: false, stencil: false, alpha: false, premultipliedAlpha: false });
-if (!gl) {
-  alert('WebGL not supported on this device/browser.');
-}
+        // Vertex + Fragment Shaders (WebGL1 / GLSL ES 1.0)
+        const vertSrc = `
+          attribute vec2 a_pos;
+          void main() {
+            gl_Position = vec4(a_pos, 0.0, 1.0);
+          }
+        `;
 
-// Vertex shader (full-screen triangle)
-const vertSrc = `
-attribute vec2 a_pos;
-void main() {
-  gl_Position = vec4(a_pos, 0.0, 1.0);
-}
-`;
+        const fragSrc = `
+          precision mediump float;
 
-// Fragment shader: neon liquid distortion + multi-sourced ripples
-// Notes:
-// - uv in [0,1] with aspect correction
-// - waves: positions (xy), age (z), decay (w)
-// - Noise and curl-like flow to add organic motion
-const fragSrc = `
-precision highp float;
+          uniform vec2 u_resolution;
+          uniform float u_time;
+          const int MAX_WAVES = ${MAX_WAVES};
+          uniform vec2 u_wavePos[MAX_WAVES]; // in 0..1 (screen UV)
+          uniform float u_waveTime[MAX_WAVES]; // seconds since start, negative when inactive
 
-uniform vec2 u_res;
-uniform float u_time;
-uniform vec4 u_waves[` + MAX_WAVES + `]; // x,y=pos (0..1), z=age, w=decay
-uniform vec3 u_base; // base neon cyan
+          // Hash/Noise helpers for organic feel
+          float hash(vec2 p) {
+            p = fract(p * vec2(123.34, 456.21));
+            p += dot(p, p + 45.32);
+            return fract(p.x * p.y);
+          }
 
-// Hash/Noise helpers
-float hash(vec2 p) {
-  p = fract(p * vec2(123.34, 456.21));
-  p += dot(p, p + 45.32);
-  return fract(p.x * p.y);
-}
-float noise(in vec2 p) {
-  vec2 i = floor(p);
-  vec2 f = fract(p);
-  float a = hash(i);
-  float b = hash(i + vec2(1.0, 0.0));
-  float c = hash(i + vec2(0.0, 1.0));
-  float d = hash(i + vec2(1.0, 1.0));
-  vec2 u = f*f*(3.0-2.0*f);
-  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
+          float noise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            float a = hash(i);
+            float b = hash(i + vec2(1.0, 0.0));
+            float c = hash(i + vec2(0.0, 1.0));
+            float d = hash(i + vec2(1.0, 1.0));
+            vec2 u = f * f * (3.0 - 2.0 * f);
+            return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+          }
 
-// Smooth pulse for ripples (easing)
-float smoothExp(float x) {
-  x = clamp(x, 0.0, 1.0);
-  // gentle ease-out curve
-  return pow(1.0 - x, 2.5);
-}
+          float fbm(vec2 p) {
+            float v = 0.0;
+            float amp = 0.5;
+            mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
+            for (int i = 0; i < 5; i++) {
+              v += amp * noise(p);
+              p = m * p;
+              amp *= 0.5;
+            }
+            return v;
+          }
 
-// Neon palette based on time and uv
-vec3 neonPalette(float t) {
-  // Cycle through bright neon hues
-  float r = 0.6 + 0.5*sin(t*1.7 + 0.0);
-  float g = 0.6 + 0.5*sin(t*1.9 + 2.1);
-  float b = 0.6 + 0.5*sin(t*2.3 + 4.2);
-  vec3 neon = vec3(r, g, b);
-  neon = pow(neon, vec3(1.2)); // boost brights
-  return clamp(neon, 0.0, 1.0);
-}
+          vec3 palette(float t) {
+            // Cosine palette across neon spectrum (blues, purples, greens, pinks, yellows)
+            return 0.5 + 0.5 * cos(6.28318 * (vec3(0.00, 0.33, 0.67) + t));
+          }
 
-// Domain warp utility
-vec2 warp(vec2 uv, float t) {
-  float n1 = noise(uv*2.0 + t*0.1);
-  float n2 = noise(uv*3.7 - t*0.07);
-  vec2 off = vec2(n1 - 0.5, n2 - 0.5);
-  return uv + off * 0.06;
-}
+          void main() {
+            vec2 res = u_resolution;
+            float aspect = res.x / res.y;
+            vec2 uv = gl_FragCoord.xy / res; // 0..1
 
-void main() {
-  vec2 res = u_res;
-  vec2 uv = gl_FragCoord.xy / res.xy;
-  // Keep square-ish scale and center
-  float asp = res.x / max(res.y, 1.0);
-  vec2 cuv = (uv - 0.5);
-  cuv.x *= asp;
-  vec2 baseUV = cuv + 0.5;
+            // Aspect-corrected space centered at 0, preserving distances
+            vec2 p = uv * 2.0 - 1.0;
+            p.x *= aspect;
 
-  // Animate flow field
-  float t = u_time;
-  vec2 wuv = warp(baseUV, t);
+            // Accumulate ripple displacement and chroma shift
+            vec2 disp = vec2(0.0);
+            float chroma = 0.0;
+            float glow = 0.0;
 
-  // Ripple accumulation: displacement + color phase
-  vec2 disp = vec2(0.0);
-  float phase = 0.0;
-  float amp = 0.0;
+            for (int i = 0; i < MAX_WAVES; i++) {
+              float t0 = u_waveTime[i];
+              if (t0 < 0.0) { continue; }
+              float age = u_time - t0;
+              if (age < 0.0) { continue; }
 
-  for (int i = 0; i < ` + MAX_WAVES + `; i++) {
-    vec4 w = u_waves[i]; // w.xy=pos, w.z=age, w.w=decayDur
-    if (w.w <= 0.0) continue; // inactive
+              vec2 wp = u_wavePos[i]; // 0..1
+              vec2 w = wp * 2.0 - 1.0; // -1..1
+              w.x *= aspect;
 
-    float age = w.z;
-    float life = clamp(age / w.w, 0.0, 1.0);
-    float e = smoothExp(life);
+              vec2 d = p - w;
+              float dist = length(d) + 1e-4;
+              float ripple = sin(12.0 * dist - 3.5 * age);
 
-    // Distance in UV space (with aspect correction)
-    vec2 p = w.xy;
-    vec2 d = (baseUV - p);
-    d.x *= asp;
+              // Natural decay over time and distance
+              float decay = exp(-1.8 * age) * exp(-2.5 * dist);
+              float wv = ripple * decay;
 
-    float r = length(d) + 1e-5;
-    // Wavefront speed + frequency
-    float speed = 0.65;
-    float freq = 28.0;
-    float k = r*freq - age*freq*speed;
+              disp += normalize(d) * wv * 0.06; // displacement strength
+              chroma += wv * 0.8;               // color shift influence
+              glow += smoothstep(0.35, 0.0, dist - 0.02 * age) * decay;
+            }
 
-    // Ripple: decaying sinus with inverse falloff
-    float ripple = sin(k) * e / (1.0 + 24.0*r);
+            vec2 q = p + disp;
 
-    // Add displacement along gradient and tangential to create swirl
-    vec2 dir = normalize(d);
-    vec2 tang = vec2(-dir.y, dir.x);
-    disp += dir * ripple * 0.035;
-    disp += tang * ripple * 0.015;
+            // Subtle evolving field for psychedelic base
+            float n = fbm(q * 2.0 + u_time * 0.05);
+            float t = n + 0.15 * chroma + u_time * 0.07;
 
-    // Color phase from ripple
-    phase += ripple * 2.2;
-    amp += e * 0.8;
-  }
+            // Blend neon palette with bright cyan base
+            vec3 neon = palette(t);
+            vec3 cyan = vec3(0.0, 1.0, 1.0);
+            vec3 col = mix(cyan, neon, 0.65);
+            col *= (1.0 + 0.45 * glow);
 
-  // Apply displacement (second warp for liquid feel)
-  vec2 uv2 = warp(baseUV + disp, t*1.1);
+            // Subtle grain for organic feel
+            float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.04;
+            col += grain;
 
-  // Subtle noise-based shimmer
-  float grain = noise(uv2*vec2(320.0, 280.0) + t*0.7) * 0.05;
+            // Gentle gamma tweak for punchy vibrance
+            col = pow(max(col, 0.0), vec3(0.9));
 
-  // Neon gradient mix
-  vec3 neon = neonPalette(t*0.55 + phase*0.25);
-  // Blend towards base cyan for cohesive look
-  vec3 base = u_base;
-  vec3 color = mix(base, neon, clamp(0.35 + amp*0.65, 0.0, 1.0));
+            gl_FragColor = vec4(col, 1.0);
+          }
+        `;
 
-  // Additional hue shift using UV curvature
-  float hueShift = sin((uv2.x+uv2.y)*8.0 + t*0.9 + phase)*0.25 + 0.25;
-  color = mix(color, neonPalette(t*0.8 + hueShift*6.2831), 0.45);
+        // Compile helpers
+        function compile(type, src) {
+          const sh = gl.createShader(type);
+          gl.shaderSource(sh, src);
+          gl.compileShader(sh);
+          if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+            const info = gl.getShaderInfoLog(sh);
+            gl.deleteShader(sh);
+            throw new Error('Shader compile failed: ' + info);
+          }
+          return sh;
+        }
 
-  // Glow-style boost
-  float glow = smoothstep(0.75, 1.0, max(color.r, max(color.g, color.b)));
-  color += glow * 0.12;
+        function createProgram(vsSrc, fsSrc) {
+          const vs = compile(gl.VERTEX_SHADER, vsSrc);
+          const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+          const prog = gl.createProgram();
+          gl.attachShader(prog, vs);
+          gl.attachShader(prog, fs);
+          gl.linkProgram(prog);
+          if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+            const info = gl.getProgramInfoLog(prog);
+            gl.deleteProgram(prog);
+            throw new Error('Program link failed: ' + info);
+          }
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+          return prog;
+        }
 
-  // Add grain as subtle variation
-  color += grain;
+        const program = createProgram(vertSrc, fragSrc);
+        gl.useProgram(program);
 
-  // Final tone map-ish soft clamp
-  color = 1.0 - exp(-color * 1.25);
+        // Fullscreen quad (triangle strip)
+        const quad = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+        gl.bufferData(
+          gl.ARRAY_BUFFER,
+          new Float32Array([
+            -1, -1,
+             1, -1,
+            -1,  1,
+             1,  1,
+          ]),
+          gl.STATIC_DRAW
+        );
 
-  gl_FragColor = vec4(color, 1.0);
-}
-`;
+        const a_pos = gl.getAttribLocation(program, 'a_pos');
+        gl.enableVertexAttribArray(a_pos);
+        gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
 
-// Compile helpers
-function makeShader(type, src) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src);
-  gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error(gl.getShaderInfoLog(s));
-    throw new Error('Shader compile failed');
-  }
-  return s;
-}
-function makeProgram(vsSrc, fsSrc) {
-  const vs = makeShader(gl.VERTEX_SHADER, vsSrc);
-  const fs = makeShader(gl.FRAGMENT_SHADER, fsSrc);
-  const p = gl.createProgram();
-  gl.attachShader(p, vs);
-  gl.attachShader(p, fs);
-  gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
-    console.error(gl.getProgramInfoLog(p));
-    throw new Error('Program link failed');
-  }
-  return p;
-}
+        // Uniform locations
+        const u_timeLoc = gl.getUniformLocation(program, 'u_time');
+        const u_resLoc = gl.getUniformLocation(program, 'u_resolution');
+        const u_wavePosLoc = gl.getUniformLocation(program, 'u_wavePos[0]');
+        const u_waveTimeLoc = gl.getUniformLocation(program, 'u_waveTime[0]');
 
-const prog = makeProgram(vertSrc, fragSrc);
-gl.useProgram(prog);
+        // Wave data arrays
+        const wavePos = new Float32Array(MAX_WAVES * 2);
+        const waveTime = new Float32Array(MAX_WAVES);
+        for (let i = 0; i < MAX_WAVES; i++) waveTime[i] = -10000;
+        let waveWriteIdx = 0;
 
-// Fullscreen triangle buffer
-const quad = gl.createBuffer();
-gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-  -1, -1,  3, -1,  -1, 3
-]), gl.STATIC_DRAW);
-const a_pos = gl.getAttribLocation(prog, 'a_pos');
-gl.enableVertexAttribArray(a_pos);
-gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
+        // Time base
+        const start = performance.now();
+        function nowSec() { return (performance.now() - start) / 1000; }
 
-// Uniform locations
-const u_res = gl.getUniformLocation(prog, 'u_res');
-const u_time = gl.getUniformLocation(prog, 'u_time');
-const u_waves = gl.getUniformLocation(prog, 'u_waves[0]');
-const u_base = gl.getUniformLocation(prog, 'u_base');
+        // Resize handling for crisp rendering
+        function resize() {
+          const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+          const w = Math.floor(canvas.clientWidth * dpr);
+          const h = Math.floor(canvas.clientHeight * dpr);
+          if (canvas.width !== w || canvas.height !== h) {
+            canvas.width = w; canvas.height = h;
+            gl.viewport(0, 0, w, h);
+          }
+        }
+        // Ensure CSS size fills viewport
+        function fit() {
+          const vw = window.innerWidth;
+          const vh = window.innerHeight;
+          canvas.style.width = vw + 'px';
+          canvas.style.height = vh + 'px';
+          resize();
+        }
+        window.addEventListener('resize', fit, { passive: true });
+        fit();
 
-// State for waves
-const waves = new Float32Array(MAX_WAVES * 4); // x,y,age,decay
-const active = new Array(MAX_WAVES).fill(false);
-const startTimes = new Float32Array(MAX_WAVES);
-const decayDur = new Float32Array(MAX_WAVES);
+        // Helper: add a new wave pulse at pixel coordinates
+        function addWaveAt(px, py) {
+          const rect = canvas.getBoundingClientRect();
+          let x = (px - rect.left) / rect.width;
+          let y = (py - rect.top) / rect.height;
+          y = 1.0 - y; // convert from top-left origin to bottom-left
+          wavePos[waveWriteIdx * 2 + 0] = x;
+          wavePos[waveWriteIdx * 2 + 1] = y;
+          waveTime[waveWriteIdx] = nowSec();
+          waveWriteIdx = (waveWriteIdx + 1) % MAX_WAVES;
+        }
 
-// Time
-let startTime = performance.now();
+        // Gesture handling (Pointer Events with multi-touch support)
+        const lastForId = new Map(); // pointerId -> {x,y,t}
+        const DIST_THRESH = 8; // px between pulses
+        const TIME_THRESH = 50; // ms between pulses
 
-// Resize
-function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
-  const w = Math.floor(innerWidth * dpr);
-  const h = Math.floor(innerHeight * dpr);
-  canvas.width = w;
-  canvas.height = h;
-  canvas.style.width = innerWidth + 'px';
-  canvas.style.height = innerHeight + 'px';
-  gl.viewport(0, 0, w, h);
-}
-addEventListener('resize', resize, { passive: true });
-resize();
+        function onPointerDown(e) {
+          e.preventDefault();
+          addWaveAt(e.clientX, e.clientY);
+          lastForId.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now() });
+        }
+        function onPointerMove(e) {
+          if (!(e.buttons & 1)) return; // only when pressed
+          e.preventDefault();
+          const last = lastForId.get(e.pointerId);
+          const t = performance.now();
+          if (!last) {
+            lastForId.set(e.pointerId, { x: e.clientX, y: e.clientY, t });
+            return;
+          }
+          const dx = e.clientX - last.x;
+          const dy = e.clientY - last.y;
+          const dist2 = dx*dx + dy*dy;
+          if (dist2 >= DIST_THRESH * DIST_THRESH || (t - last.t) >= TIME_THRESH) {
+            addWaveAt(e.clientX, e.clientY);
+            last.x = e.clientX; last.y = e.clientY; last.t = t;
+          }
+        }
+        function onPointerUp(e) {
+          e.preventDefault();
+          lastForId.delete(e.pointerId);
+        }
+        function onPointerCancel(e) {
+          e.preventDefault();
+          lastForId.delete(e.pointerId);
+        }
 
-// Utilities
-function getUV(clientX, clientY) {
-  const rect = canvas.getBoundingClientRect();
-  const x = (clientX - rect.left) / rect.width;
-  const y = (clientY - rect.top) / rect.height;
-  return [x, 1 - y]; // flip Y for more intuitive feel
-}
+        canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
+        window.addEventListener('pointermove', onPointerMove, { passive: false });
+        window.addEventListener('pointerup', onPointerUp, { passive: false });
+        window.addEventListener('pointercancel', onPointerCancel, { passive: false });
 
-function spawnWave(x, y, speedScale=1) {
-  // Reuse oldest or first inactive
-  let idx = -1;
-  let oldestAge = -1;
-  const now = performance.now();
-  for (let i = 0; i < MAX_WAVES; i++) {
-    if (!active[i]) { idx = i; break; }
-    // find one closest to done
-    const age = (now - startTimes[i]) / 1000;
-    const life = decayDur[i] > 0 ? age / decayDur[i] : 1;
-    if (life > oldestAge) { oldestAge = life; idx = i; }
-  }
-  const variance = DECAY + (Math.random()*2-1)*DECAY_VARIANCE;
-  const dur = Math.max(0.6, variance) / speedScale;
+        // iOS Safari sometimes needs explicit touch events to prevent scroll
+        function preventTouch(e) { e.preventDefault(); }
+        canvas.addEventListener('touchstart', preventTouch, { passive: false });
+        canvas.addEventListener('touchmove', preventTouch, { passive: false });
+        canvas.addEventListener('touchend', preventTouch, { passive: false });
 
-  active[idx] = true;
-  startTimes[idx] = now;
-  decayDur[idx] = dur;
+        // Render loop
+        function frame() {
+          const t = nowSec();
+          resize();
 
-  const base = idx*4;
-  waves[base+0] = x;
-  waves[base+1] = y;
-  waves[base+2] = 0;     // age
-  waves[base+3] = dur;   // decay
-}
+          gl.useProgram(program);
+          gl.uniform1f(u_timeLoc, t);
+          gl.uniform2f(u_resLoc, canvas.width, canvas.height);
+          gl.uniform2fv(u_wavePosLoc, wavePos);
+          gl.uniform1fv(u_waveTimeLoc, waveTime);
 
-function updateWaves(tSec) {
-  for (let i = 0; i < MAX_WAVES; i++) {
-    if (!active[i]) continue;
-    const base = i*4;
-    const age = tSec - (startTimes[i] - startTimeMs)/1000;
-    waves[base+2] = age;
-    if (age > waves[base+3]) {
-      active[i] = false;
-      waves[base+3] = 0; // mark inactive
-    }
-  }
-}
-
-// Input handling: multi-touch + mouse
-let isMouseDown = false;
-let lastMouse = null;
-let startTimeMs = startTime;
-
-function handleTouch(e) {
-  e.preventDefault();
-  const type = e.type;
-  const touches = e.touches;
-  if (type === 'touchstart' || type === 'touchmove') {
-    for (let i = 0; i < touches.length; i++) {
-      const t = touches[i];
-      const [u, v] = getUV(t.clientX, t.clientY);
-      spawnWave(u, v, type === 'touchmove' ? 1.2 : 1.0);
-    }
-  }
-}
-function handleMouseDown(e) {
-  isMouseDown = true;
-  const [u, v] = getUV(e.clientX, e.clientY);
-  spawnWave(u, v, 1.0);
-  lastMouse = [u, v];
-}
-function handleMouseMove(e) {
-  if (!isMouseDown) return;
-  const [u, v] = getUV(e.clientX, e.clientY);
-  // Spawn along drag path
-  spawnWave(u, v, 1.25);
-  lastMouse = [u, v];
-}
-function handleMouseUp() {
-  isMouseDown = false;
-}
-
-canvas.addEventListener('touchstart', handleTouch, { passive: false });
-canvas.addEventListener('touchmove', handleTouch, { passive: false });
-canvas.addEventListener('touchend', (e)=>e.preventDefault(), { passive: false });
-canvas.addEventListener('touchcancel', (e)=>e.preventDefault(), { passive: false });
-
-canvas.addEventListener('mousedown', handleMouseDown);
-window.addEventListener('mousemove', handleMouseMove);
-window.addEventListener('mouseup', handleMouseUp);
-
-// Animate
-function draw() {
-  const now = performance.now();
-  const tSec = (now - startTime) / 1000;
-
-  // Update wave ages
-  updateWaves(tSec);
-
-  // Uniforms
-  gl.uniform2f(u_res, canvas.width, canvas.height);
-  gl.uniform1f(u_time, tSec);
-  gl.uniform3f(u_base, BASE_CYAN[0], BASE_CYAN[1], BASE_CYAN[2]);
-  gl.uniform4fv(u_waves, waves);
-
-  // Render
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
-  requestAnimationFrame(draw);
-}
-requestAnimationFrame(draw);
-
-// Kickoff a gentle initial pulse in the center
-setTimeout(() => {
-  spawnWave(0.5, 0.5, 0.9);
-}, 250);
-
-// Prevent context menu on long-press
-window.addEventListener('contextmenu', e => e.preventDefault());
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+      })();
     </script>
 </body>
 </html>
