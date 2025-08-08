@@ -75,8 +75,12 @@
           }
         `;
 
+        // Detect the highest supported float precision in fragment shader
+        const highp = gl.getShaderPrecisionFormat && gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+        const fragPrecision = highp && highp.precision > 0 ? 'highp' : 'mediump';
+
         const fragSrc = `
-          precision mediump float;
+          precision ${fragPrecision} float;
 
           uniform vec2 u_resolution;
           uniform float u_time;
@@ -144,14 +148,17 @@
               w.x *= aspect;
 
               vec2 d = p - w;
-              float dist = length(d) + 1e-4;
+              float dist = length(d);
               float ripple = sin(12.0 * dist - 3.5 * age);
 
               // Natural decay over time and distance
               float decay = exp(-1.8 * age) * exp(-2.5 * dist);
               float wv = ripple * decay;
 
-              disp += normalize(d) * wv * 0.06; // displacement strength
+              // Avoid undefined normalize(0.0) on some GPUs
+              float distSafe = max(dist, 1e-4);
+              vec2 dir = d / distSafe;
+              disp += dir * wv * 0.06; // displacement strength
               chroma += wv * 0.8;               // color shift influence
               glow += smoothstep(0.35, 0.0, dist - 0.02 * age) * decay;
             }
@@ -211,6 +218,8 @@
 
         const program = createProgram(vertSrc, fragSrc);
         gl.useProgram(program);
+        // Ensure dithering is enabled to reduce color banding on some GPUs
+        gl.enable(gl.DITHER);
 
         // Fullscreen quad (triangle strip)
         const quad = gl.createBuffer();
