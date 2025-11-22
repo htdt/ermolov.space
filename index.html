@@ -188,7 +188,12 @@
             void main() {
                 // Screen coordinates
                 vec2 uv = (vUv - 0.5) * 2.0;
-                uv.x *= resolution.x / resolution.y;
+                float aspect = resolution.x / resolution.y;
+                if (aspect > 1.0) {
+                    uv.x *= aspect;
+                } else {
+                    uv.y /= aspect;
+                }
 
                 // Camera setup
                 vec3 forward = normalize(cameraTarget - cameraPos);
@@ -317,6 +322,11 @@
 
             renderer.domElement.addEventListener('mouseup', () => {
                 mouseDown = false;
+                // Continue auto-rotation from current angle
+            });
+
+            renderer.domElement.addEventListener('mouseleave', () => {
+                mouseDown = false;
             });
 
             renderer.domElement.addEventListener('wheel', (e) => {
@@ -426,7 +436,6 @@
                 // Auto-rotate when not interacting (slower)
                 if (!mouseDown) {
                     cameraAngleY += 0.0008;
-                    cameraAngleX = 0.3 + Math.sin(cameraAngleY * 0.3) * 0.1;
                 }
 
                 // Update camera position
