@@ -2,355 +2,399 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Alexander Ermolov</title>
     <link href="https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400&display=swap" rel="stylesheet">
     <link rel="shortcut icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgAQMAAABJtOi3AAAAA1BMVEUAAP+KeNJXAAAADElEQVR4nGNgGNwAAACgAAGwBmIYAAAAAElFTkSuQmCC">
     <style>
-        * { margin:0; padding:0; }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         html, body { height: 100%; }
         body {
-            background-color: #000;
+            overflow: hidden;
+            background: #000;
             font-family: 'Roboto Mono', monospace;
             font-size: 3vmax;
             color: #fff;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-direction: column;
-            overflow: hidden;
             touch-action: none;
         }
-        p { width: 60%; margin:0; text-align: center; line-height: 1.7; }
-        a { color:#fff; text-decoration:underline; transition: color 300ms; }
-        a:hover { color: #fff; }
-        
+
         canvas {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
+            display: block;
+            width: 100%;
             height: 100vh;
-            cursor: crosshair;
-            z-index: 1;
         }
-        
-        p {
-            position: relative;
-            z-index: 2;
+
+        .overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
             pointer-events: none;
         }
-        
-        p a {
+
+        .overlay p {
+            margin: 0;
+            line-height: 1.7;
+        }
+
+        .overlay a {
+            color: #fff;
+            text-decoration: underline;
+            transition: color 300ms;
             pointer-events: auto;
+        }
+
+        .overlay a:hover {
+            color: #4a9eff;
+        }
+
+        @media (max-width: 600px) {
+            body {
+                font-size: 4vmax;
+            }
+            .overlay {
+                top: 10px;
+                left: 10px;
+            }
         }
     </style>
 </head>
-
 <body>
-    <canvas id="canvas"></canvas>
-    <p>Alexander Ermolov</p>
-    <p>
-        <a href="https://github.com/htdt/">github</a>
-        <a href="https://www.linkedin.com/in/alexander-ermolov/">linkedin</a>
-    </p>
-    <p><a href="mailto:alex@ermolov.space">alex@ermolov.space</a></p>
+    <div class="overlay">
+        <p>Alexander Ermolov</p>
+        <p>
+            <a href="https://github.com/htdt/">github</a>
+            <a href="https://www.linkedin.com/in/alexander-ermolov/">linkedin</a>
+        </p>
+        <p><a href="mailto:alex@ermolov.space">alex@ermolov.space</a></p>
+    </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
-      (function() {
-        const MAX_WAVES = 16; // Number of simultaneous ripple sources in shader
-
-        const canvas = document.getElementById('canvas');
-        const gl = canvas.getContext('webgl', { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false });
-        if (!gl) {
-          console.warn('WebGL not supported. Background effect disabled.');
-          return;
-        }
-
-        // Vertex + Fragment Shaders (WebGL1 / GLSL ES 1.0)
-        const vertSrc = `
-          attribute vec2 a_pos;
-          void main() {
-            gl_Position = vec4(a_pos, 0.0, 1.0);
-          }
+        // Vertex shader
+        const vertexShader = `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
         `;
 
-        // Detect the highest supported float precision in fragment shader
-        const highp = gl.getShaderPrecisionFormat && gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
-        const fragPrecision = highp && highp.precision > 0 ? 'highp' : 'mediump';
+        // Fragment shader with Mandelbulb raymarching
+        const fragmentShader = `
+            uniform vec2 resolution;
+            uniform float time;
+            uniform vec3 cameraPos;
+            uniform vec3 cameraTarget;
+            uniform float power;
+            uniform int iterations;
+            uniform int maxSteps;
+            varying vec2 vUv;
 
-        const fragSrc = `
-          precision ${fragPrecision} float;
+            const float EPSILON = 0.001;
+            const float MAX_DIST = 20.0;
 
-          uniform vec2 u_resolution;
-          uniform float u_time;
-          const int MAX_WAVES = ${MAX_WAVES};
-          uniform vec2 u_wavePos[MAX_WAVES]; // in 0..1 (screen UV)
-          uniform float u_waveTime[MAX_WAVES]; // seconds since start, negative when inactive
+            // Mandelbulb distance estimator
+            float mandelbulb(vec3 pos) {
+                vec3 z = pos;
+                float dr = 1.0;
+                float r = 0.0;
 
-          // Hash/Noise helpers for organic feel
-          float hash(vec2 p) {
-            p = fract(p * vec2(123.34, 456.21));
-            p += dot(p, p + 45.32);
-            return fract(p.x * p.y);
-          }
+                for(int i = 0; i < 20; i++) {
+                    if(i >= iterations) break;
 
-          float noise(vec2 p) {
-            vec2 i = floor(p);
-            vec2 f = fract(p);
-            float a = hash(i);
-            float b = hash(i + vec2(1.0, 0.0));
-            float c = hash(i + vec2(0.0, 1.0));
-            float d = hash(i + vec2(1.0, 1.0));
-            vec2 u = f * f * (3.0 - 2.0 * f);
-            return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
-          }
+                    r = length(z);
+                    if(r > 2.0) break;
 
-          float fbm(vec2 p) {
-            float v = 0.0;
-            float amp = 0.5;
-            mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
-            for (int i = 0; i < 5; i++) {
-              v += amp * noise(p);
-              p = m * p;
-              amp *= 0.5;
-            }
-            return v;
-          }
+                    // Convert to polar coordinates
+                    float theta = acos(z.z / r);
+                    float phi = atan(z.y, z.x);
+                    dr = pow(r, power - 1.0) * power * dr + 1.0;
 
-          vec3 palette(float t) {
-            // Cosine palette across neon spectrum (blues, purples, greens, pinks, yellows)
-            return 0.5 + 0.5 * cos(6.28318 * (vec3(0.00, 0.33, 0.67) + t));
-          }
+                    // Scale and rotate the point
+                    float zr = pow(r, power);
+                    theta = theta * power;
+                    phi = phi * power;
 
-          void main() {
-            vec2 res = u_resolution;
-            float aspect = res.x / res.y;
-            vec2 uv = gl_FragCoord.xy / res; // 0..1
+                    // Convert back to cartesian coordinates
+                    z = zr * vec3(
+                        sin(theta) * cos(phi),
+                        sin(phi) * sin(theta),
+                        cos(theta)
+                    );
+                    z += pos;
+                }
 
-            // Aspect-corrected space centered at 0, preserving distances
-            vec2 p = uv * 2.0 - 1.0;
-            p.x *= aspect;
-
-            // Accumulate ripple displacement and chroma shift
-            vec2 disp = vec2(0.0);
-            float chroma = 0.0;
-            float glow = 0.0;
-
-            for (int i = 0; i < MAX_WAVES; i++) {
-              float t0 = u_waveTime[i];
-              if (t0 < 0.0) { continue; }
-              float age = u_time - t0;
-              if (age < 0.0) { continue; }
-
-              vec2 wp = u_wavePos[i]; // 0..1
-              vec2 w = wp * 2.0 - 1.0; // -1..1
-              w.x *= aspect;
-
-              vec2 d = p - w;
-              float dist = length(d);
-              float ripple = sin(12.0 * dist - 3.5 * age);
-
-              // Natural decay over time and distance
-              float decay = exp(-1.8 * age) * exp(-2.5 * dist);
-              float wv = ripple * decay;
-
-              // Avoid undefined normalize(0.0) on some GPUs
-              float distSafe = max(dist, 1e-4);
-              vec2 dir = d / distSafe;
-              disp += dir * wv * 0.06; // displacement strength
-              chroma += wv * 0.8;               // color shift influence
-              glow += smoothstep(0.35, 0.0, dist - 0.02 * age) * decay;
+                return 0.5 * log(r) * r / dr;
             }
 
-            vec2 q = p + disp;
+            // Scene distance
+            float scene(vec3 p) {
+                return mandelbulb(p);
+            }
 
-            // Subtle evolving field for psychedelic base
-            float n = fbm(q * 2.0 + u_time * 0.05);
-            float t = n + 0.15 * chroma + u_time * 0.07;
+            // Calculate normal
+            vec3 getNormal(vec3 p) {
+                vec2 e = vec2(EPSILON, 0.0);
+                return normalize(vec3(
+                    scene(p + e.xyy) - scene(p - e.xyy),
+                    scene(p + e.yxy) - scene(p - e.yxy),
+                    scene(p + e.yyx) - scene(p - e.yyx)
+                ));
+            }
 
-            // Blend neon palette with bright cyan base
-            vec3 neon = palette(t);
-            vec3 cyan = vec3(0.0, 1.0, 1.0);
-            vec3 col = mix(cyan, neon, 0.65);
-            col *= (1.0 + 0.45 * glow);
+            // Raymarching
+            float raymarch(vec3 ro, vec3 rd) {
+                float t = 0.0;
+                for(int i = 0; i < 256; i++) {
+                    if(i >= maxSteps) break;
 
-            // Subtle grain for organic feel
-            float grain = (hash(gl_FragCoord.xy + u_time) - 0.5) * 0.04;
-            col += grain;
+                    vec3 p = ro + rd * t;
+                    float d = scene(p);
 
-            // Gentle gamma tweak for punchy vibrance
-            col = pow(max(col, 0.0), vec3(0.9));
+                    if(d < EPSILON) return t;
+                    if(t > MAX_DIST) break;
 
-            gl_FragColor = vec4(col, 1.0);
-          }
+                    t += d * 0.5;
+                }
+                return -1.0;
+            }
+
+            // Ambient occlusion
+            float ao(vec3 p, vec3 n) {
+                float occ = 0.0;
+                float sca = 1.0;
+                for(int i = 0; i < 5; i++) {
+                    float h = 0.001 + 0.15 * float(i) / 4.0;
+                    float d = scene(p + h * n);
+                    occ += (h - d) * sca;
+                    sca *= 0.95;
+                }
+                return clamp(1.0 - 1.5 * occ, 0.0, 1.0);
+            }
+
+            // Color palette
+            vec3 palette(float t) {
+                vec3 a = vec3(0.5, 0.5, 0.5);
+                vec3 b = vec3(0.5, 0.5, 0.5);
+                vec3 c = vec3(1.0, 1.0, 1.0);
+                vec3 d = vec3(0.263, 0.416, 0.557);
+                return a + b * cos(6.28318 * (c * t + d));
+            }
+
+            void main() {
+                // Screen coordinates
+                vec2 uv = (vUv - 0.5) * 2.0;
+                uv.x *= resolution.x / resolution.y;
+
+                // Camera setup
+                vec3 forward = normalize(cameraTarget - cameraPos);
+                vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), forward));
+                vec3 up = cross(forward, right);
+
+                // Ray direction
+                vec3 rd = normalize(forward + uv.x * right + uv.y * up);
+                vec3 ro = cameraPos;
+
+                // Raymarch
+                float t = raymarch(ro, rd);
+
+                vec3 color = vec3(0.0);
+
+                if(t > 0.0) {
+                    vec3 p = ro + rd * t;
+                    vec3 n = getNormal(p);
+
+                    // Lighting
+                    vec3 lightPos = cameraPos + vec3(2.0, 3.0, -1.0);
+                    vec3 lightDir = normalize(lightPos - p);
+
+                    float diff = max(dot(n, lightDir), 0.0);
+                    float spec = pow(max(dot(reflect(-lightDir, n), -rd), 0.0), 32.0);
+                    float ambient = 0.3;
+                    float occ = ao(p, n);
+
+                    // Color based on position and normal
+                    vec3 baseColor = palette(length(p) * 0.3 + time * 0.1);
+                    baseColor = mix(baseColor, palette(n.y * 0.5 + 0.5), 0.3);
+
+                    color = baseColor * (ambient + diff * 0.7) * occ;
+                    color += vec3(1.0, 0.9, 0.8) * spec * 0.5;
+
+                    // Fog
+                    float fog = 1.0 - exp(-t * 0.1);
+                    color = mix(color, vec3(0.02, 0.02, 0.05), fog);
+                } else {
+                    // Background gradient
+                    color = mix(vec3(0.02, 0.02, 0.05), vec3(0.1, 0.05, 0.15), uv.y * 0.5 + 0.5);
+                }
+
+                // Tone mapping and gamma correction
+                color = color / (color + vec3(1.0));
+                color = pow(color, vec3(0.4545));
+
+                gl_FragColor = vec4(color, 1.0);
+            }
         `;
 
-        // Compile helpers
-        function compile(type, src) {
-          const sh = gl.createShader(type);
-          gl.shaderSource(sh, src);
-          gl.compileShader(sh);
-          if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-            const info = gl.getShaderInfoLog(sh);
-            gl.deleteShader(sh);
-            throw new Error('Shader compile failed: ' + info);
-          }
-          return sh;
+        // Setup
+        let scene, camera, renderer, material;
+        let mouseDown = false;
+        let lastMouseX = 0, lastMouseY = 0;
+        let cameraDistance = 3.0;
+        let cameraAngleX = 0.3;
+        let cameraAngleY = 0.5;
+
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = 1;
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            // Shader material
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                    time: { value: 0 },
+                    cameraPos: { value: new THREE.Vector3() },
+                    cameraTarget: { value: new THREE.Vector3(0, 0, 0) },
+                    power: { value: 8.0 },
+                    iterations: { value: 15 },
+                    maxSteps: { value: 100 }
+                },
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader
+            });
+
+            // Fullscreen quad
+            const geometry = new THREE.PlaneGeometry(2, 2);
+            const quad = new THREE.Mesh(geometry, material);
+            scene.add(quad);
+
+            // Controls
+            setupEventListeners();
+
+            // Animation loop
+            animate();
         }
 
-        function createProgram(vsSrc, fsSrc) {
-          const vs = compile(gl.VERTEX_SHADER, vsSrc);
-          const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
-          const prog = gl.createProgram();
-          gl.attachShader(prog, vs);
-          gl.attachShader(prog, fs);
-          gl.linkProgram(prog);
-          if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-            const info = gl.getProgramInfoLog(prog);
-            gl.deleteProgram(prog);
-            throw new Error('Program link failed: ' + info);
-          }
-          gl.deleteShader(vs);
-          gl.deleteShader(fs);
-          return prog;
+        function setupEventListeners() {
+            // Mouse events
+            renderer.domElement.addEventListener('mousedown', (e) => {
+                mouseDown = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            });
+
+            renderer.domElement.addEventListener('mousemove', (e) => {
+                if (mouseDown) {
+                    const deltaX = e.clientX - lastMouseX;
+                    const deltaY = e.clientY - lastMouseY;
+
+                    cameraAngleY += deltaX * 0.005;
+                    cameraAngleX = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, cameraAngleX + deltaY * 0.005));
+
+                    lastMouseX = e.clientX;
+                    lastMouseY = e.clientY;
+                }
+            });
+
+            renderer.domElement.addEventListener('mouseup', () => {
+                mouseDown = false;
+            });
+
+            renderer.domElement.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                cameraDistance = Math.max(1.5, Math.min(8.0, cameraDistance + e.deltaY * 0.005));
+            });
+
+            // Touch events
+            let touchStartDistance = 0;
+
+            renderer.domElement.addEventListener('touchstart', (e) => {
+                if (e.touches.length === 1) {
+                    mouseDown = true;
+                    lastMouseX = e.touches[0].clientX;
+                    lastMouseY = e.touches[0].clientY;
+                } else if (e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    touchStartDistance = Math.sqrt(dx * dx + dy * dy);
+                }
+            });
+
+            renderer.domElement.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+
+                if (e.touches.length === 1 && mouseDown) {
+                    const deltaX = e.touches[0].clientX - lastMouseX;
+                    const deltaY = e.touches[0].clientY - lastMouseY;
+
+                    cameraAngleY += deltaX * 0.008;
+                    cameraAngleX = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, cameraAngleX + deltaY * 0.008));
+
+                    lastMouseX = e.touches[0].clientX;
+                    lastMouseY = e.touches[0].clientY;
+                } else if (e.touches.length === 2) {
+                    const dx = e.touches[0].clientX - e.touches[1].clientX;
+                    const dy = e.touches[0].clientY - e.touches[1].clientY;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    if (touchStartDistance > 0) {
+                        const scale = touchStartDistance / distance;
+                        cameraDistance = Math.max(1.5, Math.min(8.0, cameraDistance * scale));
+                        touchStartDistance = distance;
+                    }
+                }
+            });
+
+            renderer.domElement.addEventListener('touchend', () => {
+                mouseDown = false;
+                touchStartDistance = 0;
+            });
+
+            // Window resize
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+                material.uniforms.resolution.value.set(window.innerWidth, window.innerHeight);
+            });
         }
 
-        const program = createProgram(vertSrc, fragSrc);
-        gl.useProgram(program);
-        // Ensure dithering is enabled to reduce color banding on some GPUs
-        gl.enable(gl.DITHER);
+        function animate() {
+            requestAnimationFrame(animate);
 
-        // Fullscreen quad (triangle strip)
-        const quad = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, quad);
-        gl.bufferData(
-          gl.ARRAY_BUFFER,
-          new Float32Array([
-            -1, -1,
-             1, -1,
-            -1,  1,
-             1,  1,
-          ]),
-          gl.STATIC_DRAW
-        );
+            // Auto-rotate when not interacting
+            if (!mouseDown) {
+                cameraAngleY += 0.003;
+                cameraAngleX = 0.3 + Math.sin(cameraAngleY * 0.5) * 0.15;
+            }
 
-        const a_pos = gl.getAttribLocation(program, 'a_pos');
-        gl.enableVertexAttribArray(a_pos);
-        gl.vertexAttribPointer(a_pos, 2, gl.FLOAT, false, 0, 0);
+            // Update camera position
+            const x = Math.cos(cameraAngleY) * Math.cos(cameraAngleX) * cameraDistance;
+            const y = Math.sin(cameraAngleX) * cameraDistance;
+            const z = Math.sin(cameraAngleY) * Math.cos(cameraAngleX) * cameraDistance;
 
-        // Uniform locations
-        const u_timeLoc = gl.getUniformLocation(program, 'u_time');
-        const u_resLoc = gl.getUniformLocation(program, 'u_resolution');
-        const u_wavePosLoc = gl.getUniformLocation(program, 'u_wavePos[0]');
-        const u_waveTimeLoc = gl.getUniformLocation(program, 'u_waveTime[0]');
+            material.uniforms.cameraPos.value.set(x, y, z);
+            material.uniforms.time.value += 0.01;
 
-        // Wave data arrays
-        const wavePos = new Float32Array(MAX_WAVES * 2);
-        const waveTime = new Float32Array(MAX_WAVES);
-        for (let i = 0; i < MAX_WAVES; i++) waveTime[i] = -10000;
-        let waveWriteIdx = 0;
+            // Animate the fractal structure
+            material.uniforms.power.value = 8.0 + Math.sin(material.uniforms.time.value * 0.3) * 0.5;
 
-        // Time base
-        const start = performance.now();
-        function nowSec() { return (performance.now() - start) / 1000; }
-
-        // Resize handling for crisp rendering
-        function resize() {
-          const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-          const w = Math.floor(canvas.clientWidth * dpr);
-          const h = Math.floor(canvas.clientHeight * dpr);
-          if (canvas.width !== w || canvas.height !== h) {
-            canvas.width = w; canvas.height = h;
-            gl.viewport(0, 0, w, h);
-          }
-        }
-        // Ensure CSS size fills viewport
-        function fit() {
-          const vw = window.innerWidth;
-          const vh = window.innerHeight;
-          canvas.style.width = vw + 'px';
-          canvas.style.height = vh + 'px';
-          resize();
-        }
-        window.addEventListener('resize', fit, { passive: true });
-        fit();
-
-        // Helper: add a new wave pulse at pixel coordinates
-        function addWaveAt(px, py) {
-          const rect = canvas.getBoundingClientRect();
-          let x = (px - rect.left) / rect.width;
-          let y = (py - rect.top) / rect.height;
-          y = 1.0 - y; // convert from top-left origin to bottom-left
-          wavePos[waveWriteIdx * 2 + 0] = x;
-          wavePos[waveWriteIdx * 2 + 1] = y;
-          waveTime[waveWriteIdx] = nowSec();
-          waveWriteIdx = (waveWriteIdx + 1) % MAX_WAVES;
+            renderer.render(scene, camera);
         }
 
-        // Gesture handling (Pointer Events with multi-touch support)
-        const lastForId = new Map(); // pointerId -> {x,y,t}
-        const DIST_THRESH = 8; // px between pulses
-        const TIME_THRESH = 50; // ms between pulses
-
-        function onPointerDown(e) {
-          e.preventDefault();
-          addWaveAt(e.clientX, e.clientY);
-          lastForId.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now() });
-        }
-        function onPointerMove(e) {
-          if (!(e.buttons & 1)) return; // only when pressed
-          e.preventDefault();
-          const last = lastForId.get(e.pointerId);
-          const t = performance.now();
-          if (!last) {
-            lastForId.set(e.pointerId, { x: e.clientX, y: e.clientY, t });
-            return;
-          }
-          const dx = e.clientX - last.x;
-          const dy = e.clientY - last.y;
-          const dist2 = dx*dx + dy*dy;
-          if (dist2 >= DIST_THRESH * DIST_THRESH || (t - last.t) >= TIME_THRESH) {
-            addWaveAt(e.clientX, e.clientY);
-            last.x = e.clientX; last.y = e.clientY; last.t = t;
-          }
-        }
-        function onPointerUp(e) {
-          e.preventDefault();
-          lastForId.delete(e.pointerId);
-        }
-        function onPointerCancel(e) {
-          e.preventDefault();
-          lastForId.delete(e.pointerId);
-        }
-
-        canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
-        window.addEventListener('pointermove', onPointerMove, { passive: false });
-        window.addEventListener('pointerup', onPointerUp, { passive: false });
-        window.addEventListener('pointercancel', onPointerCancel, { passive: false });
-
-        // iOS Safari sometimes needs explicit touch events to prevent scroll
-        function preventTouch(e) { e.preventDefault(); }
-        canvas.addEventListener('touchstart', preventTouch, { passive: false });
-        canvas.addEventListener('touchmove', preventTouch, { passive: false });
-        canvas.addEventListener('touchend', preventTouch, { passive: false });
-
-        // Render loop
-        function frame() {
-          const t = nowSec();
-          resize();
-
-          gl.useProgram(program);
-          gl.uniform1f(u_timeLoc, t);
-          gl.uniform2f(u_resLoc, canvas.width, canvas.height);
-          gl.uniform2fv(u_wavePosLoc, wavePos);
-          gl.uniform1fv(u_waveTimeLoc, waveTime);
-
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-          requestAnimationFrame(frame);
-        }
-        requestAnimationFrame(frame);
-      })();
+        // Start
+        init();
     </script>
 </body>
 </html>
